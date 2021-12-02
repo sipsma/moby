@@ -12,6 +12,8 @@ import (
 	"github.com/docker/docker/reference"
 	"github.com/moby/buildkit/exporter"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
+	"github.com/moby/buildkit/solver"
+	"github.com/moby/buildkit/util/compression"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -75,6 +77,14 @@ type imageExporterInstance struct {
 
 func (e *imageExporterInstance) Name() string {
 	return "exporting to image"
+}
+
+func (e *imageExporterInstance) Config() exporter.Config {
+	return exporter.Config{
+		Compression: solver.CompressionOpt{
+			Type: compression.Default,
+		},
+	}
 }
 
 func (e *imageExporterInstance) Export(ctx context.Context, inp exporter.Source, sessionID string) (map[string]string, error) {

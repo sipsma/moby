@@ -130,7 +130,7 @@ func normalizeLayersAndHistory(diffs []digest.Digest, history []ocispec.History,
 		// some history items are missing. add them based on the ref metadata
 		for _, md := range refMeta[historyLayers:] {
 			history = append(history, ocispec.History{
-				Created:   &md.createdAt,
+				Created:   md.createdAt,
 				CreatedBy: md.description,
 				Comment:   "buildkit.exporter.image.v0",
 			})
@@ -141,7 +141,7 @@ func normalizeLayersAndHistory(diffs []digest.Digest, history []ocispec.History,
 	for i, h := range history {
 		if !h.EmptyLayer {
 			if h.Created == nil {
-				h.Created = &refMeta[layerIndex].createdAt
+				h.Created = refMeta[layerIndex].createdAt
 			}
 			layerIndex++
 		}
@@ -184,29 +184,36 @@ func normalizeLayersAndHistory(diffs []digest.Digest, history []ocispec.History,
 
 type refMetadata struct {
 	description string
-	createdAt   time.Time
+	createdAt   *time.Time
 }
 
 func getRefMetadata(ref cache.ImmutableRef, limit int) []refMetadata {
-	if limit <= 0 {
-		return nil
-	}
-	meta := refMetadata{
-		description: "created by buildkit", // shouldn't be shown but don't fail build
-		createdAt:   time.Now(),
-	}
 	if ref == nil {
-		return append(getRefMetadata(nil, limit-1), meta)
+		return make([]refMetadata, limit)
 	}
-	if descr := ref.GetDescription(); descr != "" {
-		meta.description = descr
+
+	layerChain := ref.LayerChain()
+	defer layerChain.Release(context.TODO())
+
+	if limit < len(layerChain) {
+		layerChain = layerChain[len(layerChain)-limit:]
 	}
-	meta.createdAt = ref.GetCreatedAt()
-	p := ref.Parent()
-	if p != nil {
-		defer p.Release(context.TODO())
+
+	metas := make([]refMetadata, len(layerChain))
+	for i, layer := range layerChain {
+		meta := &metas[i]
+
+		if description := layer.GetDescription(); description != "" {
+			meta.description = description
+		} else {
+			meta.description = "created by buildkit" // shouldn't be shown but don't fail build
+		}
+
+		createdAt := layer.GetCreatedAt()
+		meta.createdAt = &createdAt
 	}
-	return append(getRefMetadata(p, limit-1), meta)
+	return metas
+
 }
 
 func oneOffProgress(ctx context.Context, id string) func(err error) error {
