@@ -183,7 +183,7 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 				inp.Metadata[exptypes.ExporterBuildInfo] = dtbi
 			}
 
-			dtic, err := inlineCache(ctx, exp.CacheExporter, r, session.NewGroup(sessionID))
+			dtic, err := inlineCache(ctx, exp.CacheExporter, r, e.Config().Compression, session.NewGroup(sessionID))
 			if err != nil {
 				return nil, err
 			}
@@ -215,7 +215,7 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 						inp.Metadata[fmt.Sprintf("%s/%s", exptypes.ExporterBuildInfo, k)] = dtbi
 					}
 
-					dtic, err := inlineCache(ctx, exp.CacheExporter, r, session.NewGroup(sessionID))
+					dtic, err := inlineCache(ctx, exp.CacheExporter, r, e.Config().Compression, session.NewGroup(sessionID))
 					if err != nil {
 						return nil, err
 					}
@@ -245,9 +245,18 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 				if err != nil {
 					return err
 				}
+
+				workerRef, ok := r.Sys().(*worker.WorkerRef)
+				if !ok {
+					return errors.Errorf("invalid reference: %T", r.Sys())
+				}
+				ctx = withDescHandlerCacheOpts(ctx, workerRef.ImmutableRef)
+
 				// all keys have same export chain so exporting others is not needed
 				_, err = r.CacheKeys()[0].Exporter.ExportTo(ctx, e, solver.CacheExportOpt{
-					Convert: workerRefConverter(g),
+					ResolveRemotes: workerRefResolver(solver.CompressionOpt{
+						Type: compression.Default, // TODO: make configurable
+					}, false, g),
 					Mode:    exp.CacheExportMode,
 					Session: g,
 				})
@@ -286,36 +295,53 @@ func (s *Solver) Solve(ctx context.Context, id string, sessionID string, req fro
 	}, nil
 }
 
-func inlineCache(ctx context.Context, e remotecache.Exporter, res solver.CachedResult, g session.Group) ([]byte, error) {
+func inlineCache(ctx context.Context, e remotecache.Exporter, res solver.CachedResult, compressionopt solver.CompressionOpt, g session.Group) ([]byte, error) {
 	if efl, ok := e.(interface {
-		ExportForLayers([]digest.Digest) ([]byte, error)
+		ExportForLayers(context.Context, []digest.Digest) ([]byte, error)
 	}); ok {
 		workerRef, ok := res.Sys().(*worker.WorkerRef)
 		if !ok {
 			return nil, errors.Errorf("invalid reference: %T", res.Sys())
 		}
 
-		remote, err := workerRef.GetRemote(ctx, true, compression.Default, false, g)
-		if err != nil || remote == nil {
+		remotes, err := workerRef.GetRemotes(ctx, true, compressionopt, false, g)
+		if err != nil || len(remotes) == 0 {
 			return nil, nil
 		}
+		remote := remotes[0]
 
 		digests := make([]digest.Digest, 0, len(remote.Descriptors))
 		for _, desc := range remote.Descriptors {
 			digests = append(digests, desc.Digest)
 		}
 
+		ctx = withDescHandlerCacheOpts(ctx, workerRef.ImmutableRef)
 		if _, err := res.CacheKeys()[0].Exporter.ExportTo(ctx, e, solver.CacheExportOpt{
-			Convert: workerRefConverter(g),
-			Mode:    solver.CacheExportModeMin,
-			Session: g,
+			ResolveRemotes: workerRefResolver(compressionopt, true, g), // load as many compression blobs as possible
+			Mode:           solver.CacheExportModeMin,
+			Session:        g,
+			CompressionOpt: &compressionopt, // cache possible compression variants
 		}); err != nil {
 			return nil, err
 		}
 
-		return efl.ExportForLayers(digests)
+		return efl.ExportForLayers(ctx, digests)
 	}
 	return nil, nil
+}
+
+func withDescHandlerCacheOpts(ctx context.Context, ref cache.ImmutableRef) context.Context {
+	return solver.WithCacheOptGetter(ctx, func(keys ...interface{}) map[interface{}]interface{} {
+		vals := make(map[interface{}]interface{})
+		for _, k := range keys {
+			if key, ok := k.(cache.DescHandlerKey); ok {
+				if handler := ref.DescHandler(digest.Digest(key)); handler != nil {
+					vals[k] = handler
+				}
+			}
+		}
+		return vals
+	})
 }
 
 func (s *Solver) Status(ctx context.Context, id string, statusChan chan *client.SolveStatus) error {
